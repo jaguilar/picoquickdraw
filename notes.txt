@@ -1,0 +1,5 @@
+Pin assigments
+
+- 16 button pullup
+- 17 potentiometer 2 (right = high)
+- 18 potentiometer 1 (right = high)

@@ -1,0 +1,6 @@
+CompileFlags:
+  Add: [-std=c++2b]
+  Remove: -std=gnu++23
+Diagnostics:
+  ClangTidy:
+    Add: []

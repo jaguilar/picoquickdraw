@@ -1,0 +1,4 @@
+Checks: 'bugprone-*'
+HeaderFilterRegex: 'lib/.*'
+FormatStyle:     google
+WarningsAsErrors: true
