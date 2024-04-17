@@ -62,7 +62,11 @@ void potentiometer_task(void *) {
   irq_set_priority(ADC_IRQ_FIFO, 0);
 
   // We want a sample ever ~5ms per adc, so set the clock to 1 per 2ms
-  adc_set_clkdiv(static_cast<float>(clock_get_hz(clk_adc)) / 500);
+  const uint32_t clock_hz = clock_get_hz(clk_adc);
+  const uint32_t target_hz = 500;
+  const float divider = 1.0f * clock_hz / target_hz;
+  logf("setting divider to %f\n", divider);
+  adc_set_clkdiv(divider);
   adc_set_round_robin(0b11);
   // We will receive an interrupt every time there are two samples in the fifo.
   adc_fifo_setup(true, false, 2, 0, false);
@@ -74,7 +78,7 @@ void potentiometer_task(void *) {
     // Wait for our task to be notified.
     logf("waiting for notification\n");
     if (xTaskNotifyWaitIndexed(kAdcTaskNotificationIndex, 0b1, 0, nullptr,
-                               pdMS_TO_TICKS(5)) != pdTRUE) {
+                               pdMS_TO_TICKS(20)) != pdPASS) {
       [[unlikely]] logf("failed to wait for notification\n");
     }
     // FIFO contains two values. Read each one.
