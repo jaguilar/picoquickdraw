@@ -57,9 +57,12 @@ void potentiometer_task(void *) {
   // the IRQ handler, so it makes sense????
   vTaskCoreAffinitySet(nullptr, 1 << portGET_CORE_ID());
   portENABLE_INTERRUPTS();
-  irq_add_shared_handler(ADC_IRQ_FIFO, adc_irq_handler, 0);
+  irq_add_shared_handler(ADC_IRQ_FIFO, adc_irq_handler, 128);
   irq_set_enabled(ADC_IRQ_FIFO, true);
   irq_set_priority(ADC_IRQ_FIFO, 0);
+
+  adc_select_input(0);
+  adc_set_round_robin(0b11);
 
   // We want a sample ever ~5ms per adc, so set the clock to 1 per 2ms
   const uint32_t clock_hz = clock_get_hz(clk_adc);
@@ -67,7 +70,6 @@ void potentiometer_task(void *) {
   const float divider = 1.0f * clock_hz / target_hz;
   logf("setting divider to %f\n", divider);
   adc_set_clkdiv(divider);
-  adc_set_round_robin(0b11);
   // We will receive an interrupt every time there are two samples in the fifo.
   adc_fifo_setup(true, false, 2, 0, false);
   adc_fifo_drain();
@@ -78,7 +80,7 @@ void potentiometer_task(void *) {
     // Wait for our task to be notified.
     logf("waiting for notification\n");
     if (xTaskNotifyWaitIndexed(kAdcTaskNotificationIndex, 0b1, 0, nullptr,
-                               pdMS_TO_TICKS(20)) != pdPASS) {
+                               pdMS_TO_TICKS(200)) != pdPASS) {
       [[unlikely]] logf("failed to wait for notification\n");
     }
     // FIFO contains two values. Read each one.
@@ -91,7 +93,6 @@ void potentiometer_task(void *) {
 
     const uint16_t num_players_sample = adc_fifo_get();
     const uint16_t target_ms_sample = adc_fifo_get();
-
     if (xSemaphoreTake(next_game_params_mutex, pdMS_TO_TICKS(1)) != pdTRUE) {
       [[unlikely]] logf("Failed to take next_game_params_mutex\n");
       continue;
