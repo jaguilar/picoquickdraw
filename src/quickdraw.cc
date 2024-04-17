@@ -12,7 +12,9 @@
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "hardware/regs/intctrl.h"
 #include "hardware/structs/clocks.h"
+#include "pico/platform.h"
 #include "portmacro.h"
 #include "projdefs.h"
 #include "semphr.h"
@@ -30,13 +32,19 @@ struct NextGameParams {
 NextGameParams next_game_params;
 SemaphoreHandle_t next_game_params_mutex;
 
+extern "C" void adc_irq_handler();
+static int irq_called_times = 0;
+
+static TaskHandle_t potentiometer_task_handle;
+static constexpr int kAdcTaskNotificationIndex = 0;
+
 // adc0 holds number of players
 // adc1 holds target ms
 void potentiometer_task(void *) {
-  static TaskHandle_t potentiometer_task_handle = xTaskGetCurrentTaskHandle();
+  potentiometer_task_handle = xTaskGetCurrentTaskHandle();
   next_game_params = {.num_players = 1, .target_ms = 200};
   static constexpr int kAdcFifoIrq = 22;
-  static constexpr int kTaskNotificationIndex = 0;
+  logf("init adc\n");
   adc_init();
   adc_gpio_init(26);
   adc_gpio_init(27);
@@ -48,29 +56,29 @@ void potentiometer_task(void *) {
   // Set our affinity to the current core. This is the same core that will have
   // the IRQ handler, so it makes sense????
   vTaskCoreAffinitySet(nullptr, 1 << portGET_CORE_ID());
-  irq_set_exclusive_handler(
-      kAdcFifoIrq, +[]() {
-        // Each time we are interrupted, notify the current task and clear the
-        // irq.
-        vTaskNotifyGiveIndexedFromISR(potentiometer_task_handle,
-                                      kTaskNotificationIndex, nullptr);
-        irq_clear(kAdcFifoIrq);
-      });
   portENABLE_INTERRUPTS();
+  irq_add_shared_handler(ADC_IRQ_FIFO, adc_irq_handler, 0);
+  irq_set_enabled(ADC_IRQ_FIFO, true);
+  irq_set_priority(ADC_IRQ_FIFO, 0);
 
   // We want a sample ever ~5ms per adc, so set the clock to 1 per 2ms
-  adc_set_clkdiv(static_cast<float>(clock_get_hz(clk_ref)) / 500);
+  adc_set_clkdiv(static_cast<float>(clock_get_hz(clk_adc)) / 500);
   adc_set_round_robin(0b11);
   // We will receive an interrupt every time there are two samples in the fifo.
   adc_fifo_setup(true, false, 2, 0, false);
+  adc_fifo_drain();
   adc_run(true);
+  logf("adc running\n");
 
-  while (true) {
+  for (int i = 0; i < 5; ++i) {
     // Wait for our task to be notified.
-    xTaskNotifyWaitIndexed(kTaskNotificationIndex, 0b1, 0, nullptr,
-                           portMAX_DELAY);
+    logf("waiting for notification\n");
+    if (xTaskNotifyWaitIndexed(kAdcTaskNotificationIndex, 0b1, 0, nullptr,
+                               pdMS_TO_TICKS(5)) != pdTRUE) {
+      [[unlikely]] logf("failed to wait for notification\n");
+    }
     // FIFO contains two values. Read each one.
-    const int level = adc_fifo_get_level();
+    const uint8_t level = adc_fifo_get_level();
     if (level != 2) {
       [[unlikely]] logf("adc level not as expected: %d\n", level);
       adc_fifo_drain();
@@ -101,6 +109,17 @@ void potentiometer_task(void *) {
            next_game_params.num_players, next_game_params.target_ms);
     }
   }
+  logf("irq called times: %d\n", irq_called_times);
+  vTaskDelay(portMAX_DELAY);
+}
+
+extern "C" void __time_critical_func(adc_irq_handler)() {
+  // Each time we are interrupted, notify the current task and clear the
+  // irq.
+  irq_called_times++;
+  vTaskNotifyGiveIndexedFromISR(potentiometer_task_handle,
+                                kAdcTaskNotificationIndex, nullptr);
+  irq_clear(ADC_IRQ_FIFO);
 }
 
 extern "C" void main_task(void *) {
