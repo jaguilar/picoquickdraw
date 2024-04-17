@@ -12,6 +12,7 @@
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "hardware/regs/adc.h"
 #include "hardware/regs/intctrl.h"
 #include "hardware/structs/clocks.h"
 #include "pico/platform.h"
@@ -25,23 +26,42 @@
 #define logf(...)
 #endif
 
+namespace {
+struct SampleStruct {
+  uint16_t num_players;
+  uint16_t target_ms;
+};
+QueueHandle_t sample_queue;
 struct NextGameParams {
   int num_players;
   int target_ms;
 };
 NextGameParams next_game_params;
 SemaphoreHandle_t next_game_params_mutex;
+int irq_called_times = 0;
+int failed_isr_sends = 0;
+TaskHandle_t potentiometer_task_handle;
+}  // namespace
 
-extern "C" void adc_irq_handler();
-static int irq_called_times = 0;
-
-static TaskHandle_t potentiometer_task_handle;
-static constexpr int kAdcTaskNotificationIndex = 0;
+extern "C" void __time_critical_func(my_adc_irq_handler)() {
+  // Each time we are interrupted, notify the current task and clear the
+  // irq.
+  irq_called_times++;
+  SampleStruct s;
+  s.num_players = adc_fifo_get();
+  s.target_ms = adc_fifo_get();
+  assert(adc_fifo_get_level() == 0);
+  if (xQueueSendFromISR(sample_queue, &s, nullptr) != pdTRUE) {
+    ++failed_isr_sends;
+  }
+}
 
 // adc0 holds number of players
 // adc1 holds target ms
 void potentiometer_task(void *) {
   potentiometer_task_handle = xTaskGetCurrentTaskHandle();
+  sample_queue = xQueueCreate(1, sizeof(SampleStruct));
+  next_game_params_mutex = xSemaphoreCreateMutex();
   next_game_params = {.num_players = 1, .target_ms = 200};
   static constexpr int kAdcFifoIrq = 22;
   logf("init adc\n");
@@ -57,7 +77,7 @@ void potentiometer_task(void *) {
   // the IRQ handler, so it makes sense????
   vTaskCoreAffinitySet(nullptr, 1 << portGET_CORE_ID());
   portENABLE_INTERRUPTS();
-  irq_add_shared_handler(ADC_IRQ_FIFO, adc_irq_handler, 128);
+  irq_add_shared_handler(ADC_IRQ_FIFO, my_adc_irq_handler, 128);
   irq_set_enabled(ADC_IRQ_FIFO, true);
   irq_set_priority(ADC_IRQ_FIFO, 0);
 
@@ -73,58 +93,50 @@ void potentiometer_task(void *) {
   // We will receive an interrupt every time there are two samples in the fifo.
   adc_fifo_setup(true, false, 2, 0, false);
   adc_fifo_drain();
+  printf("enabling adc irq\n");
+  adc_irq_set_enabled(true);
+  printf("adc irq enabled\n");
   adc_run(true);
   logf("adc running\n");
 
-  for (int i = 0; i < 5; ++i) {
+  for (int i = 0; true; ++i) {
     // Wait for our task to be notified.
-    logf("waiting for notification\n");
-    if (xTaskNotifyWaitIndexed(kAdcTaskNotificationIndex, 0b1, 0, nullptr,
-                               pdMS_TO_TICKS(200)) != pdPASS) {
+    struct SampleStruct samples;
+    if (xQueueReceive(sample_queue, &samples, pdMS_TO_TICKS(200)) != pdPASS) {
       [[unlikely]] logf("failed to wait for notification\n");
-    }
-    // FIFO contains two values. Read each one.
-    const uint8_t level = adc_fifo_get_level();
-    if (level != 2) {
-      [[unlikely]] logf("adc level not as expected: %d\n", level);
-      adc_fifo_drain();
       continue;
     }
 
-    const uint16_t num_players_sample = adc_fifo_get();
-    const uint16_t target_ms_sample = adc_fifo_get();
     if (xSemaphoreTake(next_game_params_mutex, pdMS_TO_TICKS(1)) != pdTRUE) {
       [[unlikely]] logf("Failed to take next_game_params_mutex\n");
       continue;
     };
     NextGameParams prev = next_game_params;
 
-    constexpr auto kMaxSample = std::numeric_limits<uint16_t>::max();
     next_game_params.num_players =
-        1 + static_cast<int>(std::round(3.0 * num_players_sample / kMaxSample));
+        1 + static_cast<int>(
+                std::round(3.0 * samples.num_players / ADC_FIFO_VAL_BITS));
+    // target_ms rounded to nearest 25 to reduce jitter.
     next_game_params.target_ms =
-        static_cast<int>(std::round(1000.0 * target_ms_sample / kMaxSample));
+        static_cast<int>(
+            std::round(1000 / 25 * samples.target_ms / ADC_FIFO_VAL_BITS)) *
+        25;
     if (xSemaphoreGive(next_game_params_mutex) != pdTRUE) {
       [[unlikely]] logf("Failed to give next_game_params_mutex\n");
     }
 
     if (prev.num_players != next_game_params.num_players ||
         prev.target_ms != next_game_params.target_ms) {
-      logf("change: num_players: %d, target_ms: %d\n",
-           next_game_params.num_players, next_game_params.target_ms);
+      logf("change: num_players: %d, target_ms: %d samples: %d %d\n",
+           next_game_params.num_players, next_game_params.target_ms,
+           samples.num_players, samples.target_ms);
     }
   }
-  logf("irq called times: %d\n", irq_called_times);
+  adc_run(false);
+  adc_irq_set_enabled(false);
+  logf("irq called times: %d failed_isr_sends: %d\n", irq_called_times,
+       failed_isr_sends);
   vTaskDelay(portMAX_DELAY);
-}
-
-extern "C" void __time_critical_func(adc_irq_handler)() {
-  // Each time we are interrupted, notify the current task and clear the
-  // irq.
-  irq_called_times++;
-  vTaskNotifyGiveIndexedFromISR(potentiometer_task_handle,
-                                kAdcTaskNotificationIndex, nullptr);
-  irq_clear(ADC_IRQ_FIFO);
 }
 
 extern "C" void main_task(void *) {
