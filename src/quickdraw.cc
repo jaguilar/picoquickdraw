@@ -76,10 +76,11 @@ void potentiometer_task(void *) {
   // Set our affinity to the current core. This is the same core that will have
   // the IRQ handler, so it makes sense????
   vTaskCoreAffinitySet(nullptr, 1 << portGET_CORE_ID());
-  portENABLE_INTERRUPTS();
-  irq_add_shared_handler(ADC_IRQ_FIFO, my_adc_irq_handler, 128);
+  irq_add_shared_handler(ADC_IRQ_FIFO, my_adc_irq_handler,
+                         PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
   irq_set_enabled(ADC_IRQ_FIFO, true);
   irq_set_priority(ADC_IRQ_FIFO, 0);
+  portENABLE_INTERRUPTS();
 
   adc_select_input(0);
   adc_set_round_robin(0b11);
@@ -93,9 +94,9 @@ void potentiometer_task(void *) {
   // We will receive an interrupt every time there are two samples in the fifo.
   adc_fifo_setup(true, false, 2, 0, false);
   adc_fifo_drain();
-  printf("enabling adc irq\n");
+  logf("enabling adc irq\n");
   adc_irq_set_enabled(true);
-  printf("adc irq enabled\n");
+  logf("adc irq enabled\n");
   adc_run(true);
   logf("adc running\n");
 
