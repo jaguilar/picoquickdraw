@@ -21,6 +21,8 @@ FetchContent_Declare(
 
 project(picoquickdraw VERSION 0.1.0 LANGUAGES C CXX ASM)    
 
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(PICO_BOARD "pico_w")
 
 pico_sdk_init()

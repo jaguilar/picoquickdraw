@@ -15,7 +15,11 @@
 #include "hardware/regs/adc.h"
 #include "hardware/regs/intctrl.h"
 #include "hardware/structs/clocks.h"
+#include "jagspico/cd74hc595.h"
+#include "jagspico/disp4digit.h"
 #include "pico/platform.h"
+#include "pico/time.h"
+#include "pico/types.h"
 #include "portmacro.h"
 #include "projdefs.h"
 #include "semphr.h"
@@ -53,6 +57,59 @@ extern "C" void __time_critical_func(my_adc_irq_handler)() {
   assert(adc_fifo_get_level() == 0);
   if (xQueueSendFromISR(sample_queue, &s, nullptr) != pdTRUE) {
     ++failed_isr_sends;
+  }
+}
+
+void display_task(void *) {
+  SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
+  uint16_t to_show = 0;
+  uint8_t decimal_pos = 0;
+  jagspico::Disp4Digit display{
+      {.digit_driver = *jagspico::Cd74Hc595DriverPio::Create(
+           {.pio = pio0, .pin_srclk = 19, .pin_ser = 21}),
+       .pin_select = 10,
+       .get_content_callback = [&]() {
+         if (xSemaphoreTake(mutex, pdMS_TO_TICKS(1)) != pdTRUE) {
+           panic("Failed to take mutex after 1ms\n");
+         }
+         jagspico::Disp4Digit::DisplayValue v{to_show, decimal_pos};
+         xSemaphoreGive(mutex);
+         return v;
+       }}};
+
+  absolute_time_t start = get_absolute_time();
+  constexpr int kResetTime = 125000;
+  while (true) {
+    absolute_time_t now = get_absolute_time();
+    int32_t elapsed_ms =
+        static_cast<int32_t>(absolute_time_diff_us(start, now) / 1000);
+    elapsed_ms %= kResetTime;  // Every 100s the counter will reset.
+
+    uint16_t local_to_show;
+    uint8_t local_decimal_pos;
+    if (elapsed_ms < 10000) {
+      local_to_show = elapsed_ms;
+      local_decimal_pos = 3;
+    } else if (elapsed_ms < 100000) {
+      local_to_show = elapsed_ms / 10;
+      local_decimal_pos = 2;
+    } else if (elapsed_ms < 1000000) {
+      local_to_show = elapsed_ms / 100;
+      local_decimal_pos = 1;
+    } else {
+      local_to_show = (elapsed_ms / 1000) % 10000;
+      local_decimal_pos = 0;
+    }
+
+    // Compute the position of the decimal. If we're less than 10s, it's 3
+    // (after the MSB) If we're less than 100s, it's 2. If we're less than 1000,
+    // it's 1.
+
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    to_show = local_to_show;
+    decimal_pos = local_decimal_pos;
+    xSemaphoreGive(mutex);
+    vTaskDelay(pdMS_TO_TICKS(8));  // Approx 120hz
   }
 }
 
@@ -143,5 +200,6 @@ void potentiometer_task(void *) {
 extern "C" void main_task(void *) {
   xTaskCreate(potentiometer_task, "potentiometer_task", 512, nullptr, 0,
               nullptr);
+  xTaskCreate(display_task, "display_task", 512, nullptr, 0, nullptr);
   vTaskDelay(portMAX_DELAY);
 }
