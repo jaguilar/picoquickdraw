@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.21)
 
 include(FetchContent)
 
@@ -22,6 +22,7 @@ FetchContent_Declare(
 project(picoquickdraw VERSION 0.1.0 LANGUAGES C CXX ASM)    
 
 set(PICO_BOARD "pico_w")
+
 pico_sdk_init()
 
 FetchContent_MakeAvailable(jagspico)

@@ -1,6 +1,6 @@
-build/
+/build/*
 .cmake/
 .cache/
 .vscode/
 secrets.cmake
-!build/_deps
+!/build/_deps/**/*
